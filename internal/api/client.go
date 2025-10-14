@@ -8,10 +8,10 @@ import (
 	"goweather/internal/model"
 )
 
-// Current weather (now includes surface pressure)
+// Current weather (now includes humidity & pressure)
 func GetWeather(lat, lon float64) (*model.WeatherResponse, error) {
 	url := fmt.Sprintf(
-		"https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,relative_humidity_2m,apparent_temperature,weathercode,windspeed_10m,winddirection_10m,surface_pressure",
+		"https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,relative_humidity_2m,windspeed_10m,winddirection_10m,weathercode,surface_pressure",
 		lat, lon)
 
 	resp, err := http.Get(url)
@@ -27,10 +27,10 @@ func GetWeather(lat, lon float64) (*model.WeatherResponse, error) {
 	return &w, nil
 }
 
-// Hourly forecast (temperature + wind + weathercode + pressure)
+// Hourly forecast (temperature + wind + humidity + weathercode + pressure)
 func GetHourly(lat, lon float64) (*model.HourlyForecast, error) {
 	url := fmt.Sprintf(
-		"https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&hourly=temperature_2m,windspeed_10m,weathercode,surface_pressure&forecast_days=1",
+		"https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&hourly=temperature_2m,relative_humidity_2m,windspeed_10m,weathercode,surface_pressure&forecast_days=1",
 		lat, lon)
 
 	resp, err := http.Get(url)

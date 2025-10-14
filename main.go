@@ -52,28 +52,43 @@ func printHourly(coords *api.Coordinates, theme ui.Theme, hours int) {
 		fmt.Printf(" (full day):\n\n")
 	}
 
+	// Initialize tabwriter for aligned output
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintf(w, "%s%-20s\t%s%-12s\t%s%-12s\t%s%-10s\t%s%-18s\n",
-		theme.Bold, "Time", theme.Reset, "Temp (°C)", theme.Reset, "Wind (km/h)", theme.Reset, "Pressure", theme.Reset, "Conditions")
-	fmt.Fprintf(w, "%s───────────────────────\t────────────\t────────────\t───────────\t──────────────────%s\n", theme.Gray, theme.Reset)
 
-	limit := len(forecast.Time())
-	if hours > 0 && hours < limit {
-		limit = hours
+	// Table header
+	fmt.Fprintf(w, "%s%-20s\t%10s\t%10s\t%12s\t%14s\t%-18s%s\n",
+		theme.Bold, "Time", "Temp °C", "Wind km/h", "Humidity %", "Pressure hPa", "Conditions", theme.Reset)
+	fmt.Fprintf(w, "%s───────────────────────\t────────────\t────────────\t──────────────\t────────────\t──────────────────%s\n",
+		theme.Gray, theme.Reset)
+
+	// Limit how many rows we print
+	total := len(forecast.Time())
+	if hours > 0 && hours < total {
+		total = hours
 	}
-	for i := 0; i < limit; i++ {
+
+	// Safety check: ensure slices have equal length
+	for i := 0; i < total &&
+		i < len(forecast.Temperature()) &&
+		i < len(forecast.Windspeed()) &&
+		i < len(forecast.Humidity()) &&
+		i < len(forecast.Pressure()) &&
+		i < len(forecast.Weathercode()); i++ {
+
 		cond := api.WeatherDescription(forecast.Weathercode()[i])
 		if !theme.Emoji {
 			cond = stripEmojis(cond)
 		}
 
-		fmt.Fprintf(w, "%s%-20s%s\t%s%.1f%s\t%s%.1f%s\t%s%.0f%s\t%s%s%s\n",
+		fmt.Fprintf(w, "%s%-20s%s\t%s%12.1f%s\t%s%12.1f%s\t%s%15.0f%s\t%s%20.0f%s\t%s%-20s%s\n",
 			theme.Gray, forecast.Time()[i], theme.Reset,
 			theme.Cyan, forecast.Temperature()[i], theme.Reset,
 			theme.Yellow, forecast.Windspeed()[i], theme.Reset,
-			theme.Blue, forecast.Pressure()[i], theme.Reset,
+			theme.Blue, forecast.Humidity()[i], theme.Reset,
+			theme.Cyan, forecast.Pressure()[i], theme.Reset,
 			theme.Green, cond, theme.Reset,
 		)
+
 	}
 
 	w.Flush()
@@ -105,6 +120,7 @@ func printCurrent(coords *api.Coordinates, theme ui.Theme) {
 	fmt.Fprintf(w, "%sConditions:%s\t%s%s%s\n", theme.Bold, theme.Reset, theme.Green, desc, theme.Reset)
 	fmt.Fprintf(w, "%sTime:%s\t%s%s%s\n", theme.Bold, theme.Reset, theme.Blue, weather.Current.Time, theme.Reset)
 	fmt.Fprintf(w, "%sPressure:%s\t%s%.0f hPa%s\n", theme.Bold, theme.Reset, theme.Cyan, weather.Current.Pressure, theme.Reset)
+	fmt.Fprintf(w, "%sHumidity:%s\t%s%.0f%%%s\n", theme.Bold, theme.Reset, theme.Blue, weather.Current.Humidity, theme.Reset)
 
 	w.Flush()
 	fmt.Println()
