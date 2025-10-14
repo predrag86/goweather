@@ -3,5 +3,10 @@
     "Name": "Belgrade",
     "Latitude": 44.80401,
     "Longitude": 20.46513
+  },
+  "newyork": {
+    "Name": "Newyork",
+    "Latitude": 56.25,
+    "Longitude": -5.28333
   }
 }

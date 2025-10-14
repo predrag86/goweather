@@ -8,6 +8,7 @@ import (
 	"text/tabwriter"
 
 	"goweather/internal/api"
+	appLog "goweather/internal/log"
 	"goweather/internal/ui"
 )
 
@@ -17,19 +18,26 @@ func main() {
 	hours := flag.Int("hours", 6, "Number of hours to show (0 = all)")
 	color := flag.String("color", "auto", "Color theme: auto, dark, light, none")
 	emoji := flag.String("emoji", "auto", "Emoji display: auto, on, off")
+	verbose := flag.Bool("verbose", false, "Enable verbose logging")
 	flag.Parse()
 
+	appLog.Init(*verbose)
+	defer appLog.Sync()
+
+	appLog.Info("Starting GoWeather CLI...")
 	if *city == "" {
-		fmt.Println("Usage: goweather -city=belgrade [--hourly] [--hours=N] [--color=auto|dark|light|none] [--emoji=auto|on|off]")
+		fmt.Println("Usage: goweather -city=belgrade [--hourly] [--hours=N] [--verbose]")
 		os.Exit(1)
 	}
 
 	theme := ui.GetTheme(*color, *emoji)
+	appLog.Info("Selected city: %s", *city)
 
 	coords, err := api.GetCoordinates(*city)
 	if err != nil {
-		log.Fatalf("%sGeocoding failed:%s %v\n", theme.Red, theme.Reset, err)
+		appLog.Fatal("Geocoding failed: %v", err)
 	}
+	appLog.Info("Coordinates resolved: %.2f, %.2f", coords.Latitude, coords.Longitude)
 
 	if *hourly {
 		printHourly(coords, theme, *hours)
@@ -37,6 +45,7 @@ func main() {
 	}
 
 	printCurrent(coords, theme)
+	appLog.Info("Execution complete.")
 }
 
 func printHourly(coords *api.Coordinates, theme ui.Theme, hours int) {
