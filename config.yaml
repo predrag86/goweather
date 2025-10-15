@@ -1,0 +1,7 @@
+city: "belgrade"
+hours: 6
+emoji: false
+color: "auto"
+verbose: false
+log_path: ""
+forecast_mode: "true"

@@ -3,55 +3,58 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"text/tabwriter"
 
 	"goweather/internal/api"
-	appLog "goweather/internal/log"
+	"goweather/internal/config"
+	"goweather/internal/log"
 	"goweather/internal/ui"
 )
 
 func main() {
-	city := flag.String("city", "", "City name (e.g., belgrade)")
-	hourly := flag.Bool("hourly", false, "Show hourly forecast")
-	hours := flag.Int("hours", 6, "Number of hours to show (0 = all)")
-	color := flag.String("color", "auto", "Color theme: auto, dark, light, none")
-	emoji := flag.String("emoji", "auto", "Emoji display: auto, on, off")
-	verbose := flag.Bool("verbose", false, "Enable verbose logging")
-	flag.Parse()
-
-	appLog.Init(*verbose)
-	defer appLog.Sync()
-
-	appLog.Info("Starting GoWeather CLI...")
-	if *city == "" {
-		fmt.Println("Usage: goweather -city=belgrade [--hourly] [--hours=N] [--verbose]")
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Println("Error loading config:", err)
 		os.Exit(1)
 	}
 
-	theme := ui.GetTheme(*color, *emoji)
-	appLog.Info("Selected city: %s", *city)
+	// CLI flags still override all config/environment settings
+	city := flag.String("city", cfg.City, "City name (e.g., belgrade)")
+	hours := flag.Int("hours", cfg.Hours, "Number of hours for forecast (0=all)")
+	emoji := flag.Bool("emoji", cfg.Emoji, "Enable emoji")
+	color := flag.String("color", cfg.Color, "Color theme: auto|dark|light|none")
+	verbose := flag.Bool("verbose", cfg.Verbose, "Verbose logging")
+	mode := flag.String("mode", cfg.ForecastMode, "Forecast mode: current|hourly")
+	flag.Parse()
+
+	// Initialize logger (file-only)
+	log.Init(*verbose)
+	defer log.Sync()
+
+	theme := ui.GetTheme(*color, func() string {
+		if *emoji {
+			return "on"
+		}
+		return "off"
+	}())
 
 	coords, err := api.GetCoordinates(*city)
 	if err != nil {
-		appLog.Fatal("Geocoding failed: %v", err)
+		log.Logger.Fatalw("Geocoding failed", "error", err)
 	}
-	appLog.Info("Coordinates resolved: %.2f, %.2f", coords.Latitude, coords.Longitude)
 
-	if *hourly {
+	if *mode == "hourly" {
 		printHourly(coords, theme, *hours)
-		return
+	} else {
+		printCurrent(coords, theme)
 	}
-
-	printCurrent(coords, theme)
-	appLog.Info("Execution complete.")
 }
 
 func printHourly(coords *api.Coordinates, theme ui.Theme, hours int) {
 	forecast, err := api.GetHourly(coords.Latitude, coords.Longitude)
 	if err != nil {
-		log.Fatalf("%sHourly fetch failed:%s %v\n", theme.Red, theme.Reset, err)
+		log.Logger.Fatalw("Hourly fetch failed", "error", err)
 	}
 
 	fmt.Printf("\n%sHourly forecast for %s%s", theme.Bold, coords.Name, theme.Reset)
@@ -107,7 +110,7 @@ func printHourly(coords *api.Coordinates, theme ui.Theme, hours int) {
 func printCurrent(coords *api.Coordinates, theme ui.Theme) {
 	weather, err := api.GetWeather(coords.Latitude, coords.Longitude)
 	if err != nil {
-		log.Fatalf("%sWeather fetch failed:%s %v\n", theme.Red, theme.Reset, err)
+		log.Logger.Fatalw("Weather fetch failed", "error", err)
 	}
 
 	desc := api.WeatherDescription(weather.Current.Weathercode)
