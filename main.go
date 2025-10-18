@@ -1,25 +1,34 @@
 package main
 
 import (
+	"encoding/gob"
 	"flag"
 	"fmt"
 	"os"
 	"text/tabwriter"
+	"time"
 
 	"goweather/internal/api"
+	"goweather/internal/cache"
 	"goweather/internal/config"
 	"goweather/internal/log"
+	"goweather/internal/model"
 	"goweather/internal/ui"
 )
 
 func main() {
+	// --- Load configuration ---
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Println("Error loading config:", err)
 		os.Exit(1)
 	}
 
-	// CLI flags still override all config/environment settings
+	// Register model types for gob cache
+	gob.Register(&model.WeatherResponse{})
+	gob.Register(&model.HourlyForecast{})
+
+	// --- CLI overrides (highest priority) ---
 	city := flag.String("city", cfg.City, "City name (e.g., belgrade)")
 	hours := flag.Int("hours", cfg.Hours, "Number of hours for forecast (0=all)")
 	emoji := flag.Bool("emoji", cfg.Emoji, "Enable emoji")
@@ -28,78 +37,136 @@ func main() {
 	mode := flag.String("mode", cfg.ForecastMode, "Forecast mode: current|hourly")
 	flag.Parse()
 
-	// Initialize logger (file-only)
+	// --- Initialize file-only logger ---
 	log.Init(*verbose)
 	defer log.Sync()
 
-	theme := ui.GetTheme(*color, func() string {
-		if *emoji {
-			return "on"
-		}
-		return "off"
-	}())
+	// --- Initialize theme ---
+	emojiMode := "off"
+	if *emoji {
+		emojiMode = "on"
+	}
+	theme := ui.GetTheme(*color, emojiMode)
 
+	// --- Initialize cache (configurable expiry) ---
+	c := cache.NewCache(cfg.CacheDuration)
+
+	// --- Get coordinates ---
 	coords, err := api.GetCoordinates(*city)
 	if err != nil {
 		log.Logger.Fatalw("Geocoding failed", "error", err)
 	}
 
+	// --- Define cache key ---
+	key := fmt.Sprintf("%s_%s", *city, *mode)
+
+	// --- Try cache first ---
+	if data, ok := c.Get(key); ok {
+		log.Logger.Infow("Cache hit", "city", *city, "mode", *mode)
+		switch *mode {
+		case "hourly":
+			printHourly(data.(*model.HourlyForecast), theme, *hours, cfg)
+		default:
+			printCurrent(data.(*model.WeatherResponse), theme)
+		}
+		return
+	}
+
+	// --- Otherwise fetch new data + store + refresh in background ---
 	if *mode == "hourly" {
-		printHourly(coords, theme, *hours)
+		result, err := api.GetHourly(coords.Latitude, coords.Longitude)
+		if err != nil {
+			log.Logger.Fatalw("Hourly fetch failed", "error", err)
+		}
+		c.Set(key, result)
+		c.BackgroundRefresh(key, func() (any, error) {
+			return api.GetHourly(coords.Latitude, coords.Longitude)
+		})
+		printHourly(result, theme, *hours, cfg)
 	} else {
-		printCurrent(coords, theme)
+		result, err := api.GetWeather(coords.Latitude, coords.Longitude)
+		if err != nil {
+			log.Logger.Fatalw("Current fetch failed", "error", err)
+		}
+		c.Set(key, result)
+		c.BackgroundRefresh(key, func() (any, error) {
+			return api.GetWeather(coords.Latitude, coords.Longitude)
+		})
+		printCurrent(result, theme)
 	}
 }
 
-func printHourly(coords *api.Coordinates, theme ui.Theme, hours int) {
-	forecast, err := api.GetHourly(coords.Latitude, coords.Longitude)
-	if err != nil {
-		log.Logger.Fatalw("Hourly fetch failed", "error", err)
-	}
+// ---------------------------------------------------------------
+// Helper functions for printing results
+// ---------------------------------------------------------------
 
-	fmt.Printf("\n%sHourly forecast for %s%s", theme.Bold, coords.Name, theme.Reset)
-	if hours > 0 {
-		fmt.Printf(" (next %d h):\n\n", hours)
-	} else {
-		fmt.Printf(" (full day):\n\n")
-	}
-
-	// Initialize tabwriter for aligned output
+// printCurrent prints the current weather summary.
+func printCurrent(weather *model.WeatherResponse, theme ui.Theme) {
+	fmt.Printf("\n%sCurrent weather:%s\n", theme.Bold, theme.Reset)
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintf(w, "%s%-20s\t%-12s%s\n", theme.Bold, "Parameter", "Value", theme.Reset)
+	fmt.Fprintf(w, "%s──────────────────────\t───────────────%s\n", theme.Gray, theme.Reset)
 
-	// Table header
-	fmt.Fprintf(w, "%s%-20s\t%10s\t%10s\t%12s\t%14s\t%-18s%s\n",
-		theme.Bold, "Time", "Temp °C", "Wind km/h", "Humidity %", "Pressure hPa", "Conditions", theme.Reset)
-	fmt.Fprintf(w, "%s───────────────────────\t────────────\t────────────\t──────────────\t────────────\t──────────────────%s\n",
+	fmt.Fprintf(w, "%sTemperature%s\t%.1f °C\n", theme.Cyan, theme.Reset, weather.Current.Temperature)
+	fmt.Fprintf(w, "%sHumidity%s\t%.0f %%\n", theme.Blue, theme.Reset, weather.Current.Humidity)
+	fmt.Fprintf(w, "%sWind speed%s\t%.1f km/h\n", theme.Yellow, theme.Reset, weather.Current.Windspeed)
+	fmt.Fprintf(w, "%sWind direction%s\t%s\n", theme.Yellow, theme.Reset, degreesToCompass(weather.Current.Winddirection))
+	fmt.Fprintf(w, "%sPressure%s\t%.0f hPa\n", theme.Green, theme.Reset, weather.Current.Pressure)
+	fmt.Fprintf(w, "%sCondition%s\t%s\n", theme.Red, theme.Reset, WeatherDescription(weather.Current.Weathercode))
+	w.Flush()
+	fmt.Println()
+}
+
+// printHourly prints the hourly forecast for the next N hours (in chosen time zone).
+func printHourly(forecast *model.HourlyForecast, theme ui.Theme, hours int, cfg *config.Config) {
+	// Determine time zone (from config or system local)
+	loc := time.Local
+	locName := "Local"
+	if cfg.TimeZone != "" && cfg.TimeZone != "local" {
+		userLoc, err := time.LoadLocation(cfg.TimeZone)
+		if err == nil {
+			loc = userLoc
+			locName = cfg.TimeZone
+		} else {
+			fmt.Printf("%sWarning:%s invalid time zone '%s', using local time\n",
+				theme.Yellow, theme.Reset, cfg.TimeZone)
+		}
+	}
+
+	fmt.Printf("\n%sHourly forecast (%s):%s\n", theme.Bold, locName, theme.Reset)
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintf(w, "%s%-20s\t%-12s\t%-12s\t%-12s\t%-12s\t%-12s\t%-16s%s\n",
+		theme.Bold, "Time", "Temp (°C)", "Wind (km/h)", "Dir (°)", "Humidity (%)", "Pressure (hPa)", "Conditions", theme.Reset)
+	fmt.Fprintf(w, "%s──────────────────────\t────────────\t────────────\t────────────\t────────────\t────────────\t──────────────────%s\n",
 		theme.Gray, theme.Reset)
 
-	// Limit how many rows we print
-	total := len(forecast.Time())
-	if hours > 0 && hours < total {
-		total = hours
+	limit := len(forecast.Hourly.Time)
+	if hours > 0 && hours < limit {
+		limit = hours
 	}
 
-	// Safety check: ensure slices have equal length
-	for i := 0; i < total &&
-		i < len(forecast.Temperature()) &&
-		i < len(forecast.Windspeed()) &&
-		i < len(forecast.Humidity()) &&
-		i < len(forecast.Pressure()) &&
-		i < len(forecast.Weathercode()); i++ {
+	for i := 0; i < limit; i++ {
+		// Parse UTC time and convert to chosen time zone
+		tUTC, err := time.Parse(time.RFC3339, forecast.Hourly.Time[i])
+		if err != nil {
+			tUTC, _ = time.Parse("2006-01-02T15:04", forecast.Hourly.Time[i])
+		}
+		tLocal := tUTC.In(loc)
 
-		cond := api.WeatherDescription(forecast.Weathercode()[i])
+		cond := WeatherDescription(forecast.Hourly.Weathercode[i])
 		if !theme.Emoji {
 			cond = stripEmojis(cond)
 		}
 
-		fmt.Fprintf(w, "%s%-20s%s\t%s%12.1f%s\t%s%12.1f%s\t%s%15.0f%s\t%s%20.0f%s\t%s%-20s%s\n",
-			theme.Gray, forecast.Time()[i], theme.Reset,
-			theme.Cyan, forecast.Temperature()[i], theme.Reset,
-			theme.Yellow, forecast.Windspeed()[i], theme.Reset,
-			theme.Blue, forecast.Humidity()[i], theme.Reset,
-			theme.Cyan, forecast.Pressure()[i], theme.Reset,
-			theme.Green, cond, theme.Reset,
-		)
+		fmt.Fprintf(w, "%s%-20s%s\t%s%6.1f%s\t%s%6.1f%s\t%s%6.0f° %s%-3s%s\t%s%6.0f%s\t%s%6.0f%s\t%s%-16s%s\n",
+			theme.Gray, tLocal.Format("2006-01-02 15:04"), theme.Reset,
+			theme.Cyan, forecast.Hourly.Temperature[i], theme.Reset,
+			theme.Yellow, forecast.Hourly.Windspeed[i], theme.Reset,
+			theme.Yellow, forecast.Hourly.Winddirection[i], theme.Gray, degreesToCompass(forecast.Hourly.Winddirection[i]), theme.Reset,
+			theme.Blue, forecast.Hourly.Humidity[i], theme.Reset,
+			theme.Cyan, forecast.Hourly.Pressure[i], theme.Reset,
+			theme.Green, cond, theme.Reset)
 
 	}
 
@@ -107,44 +174,45 @@ func printHourly(coords *api.Coordinates, theme ui.Theme, hours int) {
 	fmt.Println()
 }
 
-func printCurrent(coords *api.Coordinates, theme ui.Theme) {
-	weather, err := api.GetWeather(coords.Latitude, coords.Longitude)
-	if err != nil {
-		log.Logger.Fatalw("Weather fetch failed", "error", err)
-	}
-
-	desc := api.WeatherDescription(weather.Current.Weathercode)
-	if !theme.Emoji {
-		desc = stripEmojis(desc)
-	}
-
-	icon := ""
-	if theme.Emoji {
-		icon = "☁️ "
-	}
-
-	fmt.Printf("\n%sWeather in %s%s\n", theme.Bold, coords.Name, theme.Reset)
-	fmt.Println("───────────────────────────────")
-
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintf(w, "%s%sTemperature:%s\t%s%.1f °C%s\n", theme.Bold, icon, theme.Reset, theme.Cyan, weather.Current.Temperature, theme.Reset)
-	fmt.Fprintf(w, "%sWind:%s\t%s%.1f km/h%s %s(dir %d°)%s\n", theme.Bold, theme.Reset, theme.Yellow, weather.Current.Windspeed, theme.Reset, theme.Gray, weather.Current.Winddirection, theme.Reset)
-	fmt.Fprintf(w, "%sConditions:%s\t%s%s%s\n", theme.Bold, theme.Reset, theme.Green, desc, theme.Reset)
-	fmt.Fprintf(w, "%sTime:%s\t%s%s%s\n", theme.Bold, theme.Reset, theme.Blue, weather.Current.Time, theme.Reset)
-	fmt.Fprintf(w, "%sPressure:%s\t%s%.0f hPa%s\n", theme.Bold, theme.Reset, theme.Cyan, weather.Current.Pressure, theme.Reset)
-	fmt.Fprintf(w, "%sHumidity:%s\t%s%.0f%%%s\n", theme.Bold, theme.Reset, theme.Blue, weather.Current.Humidity, theme.Reset)
-
-	w.Flush()
-	fmt.Println()
-}
-
+// stripEmojis removes emojis when user disables them.
 func stripEmojis(s string) string {
 	runes := []rune{}
 	for _, r := range s {
-		if r > 127 { // simple heuristic to skip emoji
-			continue
+		if r <= 127 { // basic ASCII
+			runes = append(runes, r)
 		}
-		runes = append(runes, r)
 	}
 	return string(runes)
+}
+
+func degreesToCompass(deg float64) string {
+	dirs := []string{"N", "NE", "E", "SE", "S", "SW", "W", "NW"}
+	idx := int((deg+22.5)/45.0) % 8
+	return dirs[idx]
+}
+
+// WeatherDescription converts weather codes to text.
+func WeatherDescription(code int) string {
+	switch code {
+	case 0:
+		return "☀️ Clear sky"
+	case 1, 2:
+		return "🌤️ Partly cloudy"
+	case 3:
+		return "☁️ Overcast"
+	case 45, 48:
+		return "🌫️ Fog"
+	case 51, 53, 55:
+		return "🌦️ Drizzle"
+	case 61, 63, 65:
+		return "🌧️ Rain"
+	case 80, 81, 82:
+		return "🌧️ Rain showers"
+	case 95:
+		return "⛈️ Thunderstorm"
+	case 96, 99:
+		return "🌩️ Thunderstorm with hail"
+	default:
+		return "🌈 Unknown"
+	}
 }
