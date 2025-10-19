@@ -34,6 +34,10 @@ func NewCache(expiry time.Duration) *Cache {
 		cacheFile: path,
 	}
 	c.loadFromFile()
+	log.Logger.Infow("Cache initialized",
+		"path", c.cacheFile,
+		"expiry", expiry.String(),
+	)
 	return c
 }
 
@@ -44,12 +48,18 @@ func (c *Cache) Get(key string) (any, bool) {
 
 	item, ok := c.items[key]
 	if !ok {
+		log.Logger.Debugw("Cache miss", "key", key)
 		return nil, false
 	}
+
 	if time.Since(item.Timestamp) > c.expiry {
+		log.Logger.Infow("Cache expired", "key", key,
+			"age", time.Since(item.Timestamp).Round(time.Second).String())
 		delete(c.items, key)
 		return nil, false
 	}
+
+	log.Logger.Debugw("Cache hit", "key", key)
 	return item.Data, true
 }
 
@@ -59,6 +69,10 @@ func (c *Cache) Set(key string, value any) {
 	defer c.mu.Unlock()
 	c.items[key] = Item{Data: value, Timestamp: time.Now()}
 	c.saveToFile()
+	log.Logger.Infow("Cache updated",
+		"key", key,
+		"total_items", len(c.items),
+	)
 }
 
 // BackgroundRefresh launches a goroutine that refreshes a key periodically.
@@ -82,6 +96,7 @@ func (c *Cache) BackgroundRefresh(key string, refreshFn func() (any, error)) {
 func (c *Cache) loadFromFile() {
 	file, err := os.Open(c.cacheFile)
 	if err != nil {
+		log.Logger.Debugw("No existing cache file, starting empty", "path", c.cacheFile)
 		return
 	}
 	defer file.Close()
@@ -89,6 +104,11 @@ func (c *Cache) loadFromFile() {
 	dec := gob.NewDecoder(file)
 	if err := dec.Decode(&c.items); err != nil {
 		log.Logger.Warnw("Failed to decode cache", "error", err)
+	} else {
+		log.Logger.Infow("Cache loaded from disk",
+			"items", len(c.items),
+			"path", c.cacheFile,
+		)
 	}
 }
 
@@ -103,5 +123,7 @@ func (c *Cache) saveToFile() {
 	enc := gob.NewEncoder(file)
 	if err := enc.Encode(c.items); err != nil {
 		log.Logger.Warnw("Failed to encode cache", "error", err)
+	} else {
+		log.Logger.Debugw("Cache saved to disk", "path", c.cacheFile)
 	}
 }
