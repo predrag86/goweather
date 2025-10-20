@@ -1,9 +1,9 @@
 city: belgrade
 hours: 12
-emoji: true
+emoji: false
 color: auto
 verbose: false
-forecast_mode: current
+forecast_mode: both
 log_path: ./logs/weather.log
 cache_duration: 15m
 time_zone: Europe/Belgrade
