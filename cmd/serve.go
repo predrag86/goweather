@@ -17,6 +17,8 @@ import (
 	"goweather/internal/log"
 	"goweather/internal/model"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 )
 
@@ -53,6 +55,7 @@ func runServer(cmd *cobra.Command, args []string) {
 	mux.HandleFunc("/api/v1/hourly", func(w http.ResponseWriter, r *http.Request) {
 		handleHourly(w, r, c)
 	})
+	mux.Handle("/metrics", promhttp.Handler())
 
 	addr := fmt.Sprintf(":%d", port)
 
@@ -177,16 +180,23 @@ func writeLimitedHourlyJSON(w http.ResponseWriter, forecast *model.HourlyForecas
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
-		// Wrap ResponseWriter so we can capture status code
 		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
 		start := time.Now()
 		next.ServeHTTP(lrw, r)
 		duration := time.Since(start)
 
+		path := r.URL.Path
+		statusStr := strconv.Itoa(lrw.statusCode)
+
+		// Prometheus metrics
+		httpRequestsTotal.WithLabelValues(r.Method, path, statusStr).Inc()
+		httpRequestDuration.WithLabelValues(r.Method, path).Observe(duration.Seconds())
+
+		// Structured log
 		log.Logger.Infow("HTTP request",
 			"method", r.Method,
-			"path", r.URL.Path,
+			"path", path,
 			"status", lrw.statusCode,
 			"duration_ms", duration.Milliseconds(),
 			"client_ip", r.RemoteAddr,
@@ -203,4 +213,29 @@ type loggingResponseWriter struct {
 func (lrw *loggingResponseWriter) WriteHeader(code int) {
 	lrw.statusCode = code
 	lrw.ResponseWriter.WriteHeader(code)
+}
+
+var (
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "goweather_http_requests_total",
+			Help: "Total number of HTTP requests",
+		},
+		[]string{"method", "path", "status"},
+	)
+
+	httpRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "goweather_http_request_duration_seconds",
+			Help:    "Duration of HTTP requests in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "path"},
+	)
+)
+
+func init() {
+	// Register metrics once when this package is loaded
+	prometheus.MustRegister(httpRequestsTotal)
+	prometheus.MustRegister(httpRequestDuration)
 }
