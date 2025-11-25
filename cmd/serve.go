@@ -1,10 +1,15 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
+	"time"
 
 	"goweather/internal/api"
 	"goweather/internal/cache"
@@ -41,17 +46,44 @@ func runServer(cmd *cobra.Command, args []string) {
 
 	c := cache.NewCache(cfg.CacheDuration)
 
-	http.HandleFunc("/api/v1/current", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/current", func(w http.ResponseWriter, r *http.Request) {
 		handleCurrent(w, r, c)
 	})
-	http.HandleFunc("/api/v1/hourly", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/hourly", func(w http.ResponseWriter, r *http.Request) {
 		handleHourly(w, r, c)
 	})
 
 	addr := fmt.Sprintf(":%d", port)
-	log.Logger.Infow("Starting HTTP server", "port", port)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Logger.Fatalw("Server failed", "error", err)
+
+	// ⭐ ADD MIDDLEWARE HERE (Step 2)
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: loggingMiddleware(mux), // ← Here!
+	}
+
+	// Start server in goroutine
+	go func() {
+		log.Logger.Infow("Starting HTTP server", "port", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Logger.Fatalw("Server failed", "error", err)
+		}
+	}()
+
+	// Graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit
+
+	log.Logger.Infow("Shutdown signal received, shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Logger.Errorw("Server forced to shutdown", "error", err)
+	} else {
+		log.Logger.Infow("Server stopped gracefully")
 	}
 }
 
@@ -139,4 +171,36 @@ func writeLimitedHourlyJSON(w http.ResponseWriter, forecast *model.HourlyForecas
 	}
 
 	writeJSON(w, forecast)
+}
+
+// loggingMiddleware logs every HTTP request using zap.
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		// Wrap ResponseWriter so we can capture status code
+		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+
+		start := time.Now()
+		next.ServeHTTP(lrw, r)
+		duration := time.Since(start)
+
+		log.Logger.Infow("HTTP request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", lrw.statusCode,
+			"duration_ms", duration.Milliseconds(),
+			"client_ip", r.RemoteAddr,
+		)
+	})
+}
+
+// loggingResponseWriter allows us to capture response status
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (lrw *loggingResponseWriter) WriteHeader(code int) {
+	lrw.statusCode = code
+	lrw.ResponseWriter.WriteHeader(code)
 }
