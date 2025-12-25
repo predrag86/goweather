@@ -89,7 +89,7 @@ goweather/
 Requires **Go 1.23+**.
 
 ```bash
-git clone https://github.com/<your-username>/goweather.git
+git clone https://github.com/predrag86/goweather.git
 cd goweather
 ```
 
